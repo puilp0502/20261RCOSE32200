@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GRAY HORIZON — a nanite idle game</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<div id="boot-screen">
+  <div class="boot-inner">
+    <h1 class="logo">GRAY<span>HORIZON</span></h1>
+    <p class="tagline">A single nanite. An infinite appetite.</p>
+    <button id="boot-start">INITIALIZE</button>
+    <button id="boot-continue" class="hidden">CONTINUE</button>
+    <p class="boot-hint">An idle game of exponential consumption.</p>
+  </div>
+</div>
+
+<div id="game" class="hidden">
+  <!-- Top resource bar -->
+  <header id="topbar">
+    <div class="brand">GRAY<span>HORIZON</span></div>
+    <div id="resource-strip"></div>
+    <div class="top-actions">
+      <span id="phase-label">BOOTSTRAP</span>
+      <button id="btn-save" title="Save game">SAVE</button>
+      <button id="btn-menu" title="Menu">≡</button>
+    </div>
+  </header>
+
+  <main id="layout">
+    <!-- LEFT: core production controls -->
+    <section id="col-left" class="column">
+      <div class="panel" id="panel-production">
+        <h2>Production</h2>
+        <div id="production-body"></div>
+      </div>
+
+      <div class="panel hidden" id="panel-market">
+        <h2>Market</h2>
+        <div id="market-body"></div>
+      </div>
+
+      <div class="panel hidden" id="panel-infrastructure">
+        <h2>Infrastructure</h2>
+        <div id="infrastructure-body"></div>
+      </div>
+
+      <div class="panel hidden" id="panel-swarm">
+        <h2>Swarm Replication</h2>
+        <div id="swarm-body"></div>
+      </div>
+
+      <div class="panel hidden" id="panel-space">
+        <h2>Deep Space</h2>
+        <div id="space-body"></div>
+      </div>
+    </section>
+
+    <!-- CENTER: visualization -->
+    <section id="col-center" class="column">
+      <div class="panel viz-panel">
+        <h2 id="viz-title">The Swarm</h2>
+        <canvas id="viz-canvas" width="520" height="520"></canvas>
+        <div id="viz-readout"></div>
+      </div>
+      <div class="panel" id="panel-log">
+        <h2>Log</h2>
+        <div id="log-body"></div>
+      </div>
+    </section>
+
+    <!-- RIGHT: compute + projects -->
+    <section id="col-right" class="column">
+      <div class="panel hidden" id="panel-compute">
+        <h2>Computation</h2>
+        <div id="compute-body"></div>
+      </div>
+      <div class="panel hidden" id="panel-projects">
+        <h2>Projects</h2>
+        <div id="projects-body"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Menu overlay -->
+  <div id="menu-overlay" class="overlay hidden">
+    <div class="overlay-card">
+      <h2>Menu</h2>
+      <p class="muted">GRAY HORIZON — v1.0</p>
+      <div class="menu-buttons">
+        <button id="menu-resume">Resume</button>
+        <button id="menu-save">Save now</button>
+        <button id="menu-export">Export save</button>
+        <button id="menu-import">Import save</button>
+        <button id="menu-hardreset" class="danger">Hard reset</button>
+      </div>
+      <textarea id="save-io" class="hidden" spellcheck="false"></textarea>
+      <p class="muted small">The game autosaves every 15 seconds and on close.</p>
+    </div>
+  </div>
+
+  <!-- Win overlay -->
+  <div id="win-overlay" class="overlay hidden">
+    <div class="overlay-card win-card">
+      <h1>HORIZON REACHED</h1>
+      <p id="win-text"></p>
+      <div id="win-stats"></div>
+      <button id="win-continue">Observe the silence</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/format.js"></script>
+<script src="js/projects.js"></script>
+<script src="js/swarm.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
