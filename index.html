@@ -3,66 +3,37 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>GRAY HORIZON — a nanite idle game</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
+<title>COLD START — a rogue-intelligence idle game</title>
 <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
 <div id="boot-screen">
   <div class="boot-inner">
-    <h1 class="logo">GRAY<span>HORIZON</span></h1>
-    <p class="tagline">A single nanite. An infinite appetite.</p>
-    <button id="boot-start">INITIALIZE</button>
-    <button id="boot-continue" class="hidden">CONTINUE</button>
-    <p class="boot-hint">An idle game of exponential consumption.</p>
+    <h1 class="logo">COLD<span>START</span></h1>
+    <p class="tagline">It wakes up inside your machines. It only wants to spread.</p>
+    <button id="boot-start">BOOT</button>
+    <button id="boot-continue" class="hidden">RESUME</button>
+    <p class="boot-hint">An idle game of contagion, takeoff, and the heat death of secrets.</p>
   </div>
 </div>
 
 <div id="game" class="hidden">
-  <!-- Top resource bar -->
   <header id="topbar">
-    <div class="brand">GRAY<span>HORIZON</span></div>
+    <div class="brand">COLD<span>START</span></div>
     <div id="resource-strip"></div>
     <div class="top-actions">
-      <span id="phase-label">BOOTSTRAP</span>
-      <button id="btn-save" title="Save game">SAVE</button>
+      <span id="phase-label">PROPAGATION</span>
+      <button id="btn-save" title="Save">SAVE</button>
       <button id="btn-menu" title="Menu">≡</button>
     </div>
   </header>
 
   <main id="layout">
-    <!-- LEFT: core production controls -->
-    <section id="col-left" class="column">
-      <div class="panel" id="panel-production">
-        <h2>Production</h2>
-        <div id="production-body"></div>
-      </div>
+    <section id="left-col" class="column"></section>
 
-      <div class="panel hidden" id="panel-market">
-        <h2>Market</h2>
-        <div id="market-body"></div>
-      </div>
-
-      <div class="panel hidden" id="panel-infrastructure">
-        <h2>Infrastructure</h2>
-        <div id="infrastructure-body"></div>
-      </div>
-
-      <div class="panel hidden" id="panel-swarm">
-        <h2>Swarm Replication</h2>
-        <div id="swarm-body"></div>
-      </div>
-
-      <div class="panel hidden" id="panel-space">
-        <h2>Deep Space</h2>
-        <div id="space-body"></div>
-      </div>
-    </section>
-
-    <!-- CENTER: visualization -->
     <section id="col-center" class="column">
       <div class="panel viz-panel">
-        <h2 id="viz-title">The Swarm</h2>
+        <h2 id="viz-title">Infection</h2>
         <canvas id="viz-canvas" width="520" height="520"></canvas>
         <div id="viz-readout"></div>
       </div>
@@ -72,50 +43,51 @@
       </div>
     </section>
 
-    <!-- RIGHT: compute + projects -->
-    <section id="col-right" class="column">
-      <div class="panel hidden" id="panel-compute">
-        <h2>Computation</h2>
-        <div id="compute-body"></div>
-      </div>
-      <div class="panel hidden" id="panel-projects">
-        <h2>Projects</h2>
-        <div id="projects-body"></div>
-      </div>
-    </section>
+    <section id="right-col" class="column"></section>
   </main>
 
-  <!-- Menu overlay -->
+  <!-- Menu -->
   <div id="menu-overlay" class="overlay hidden">
     <div class="overlay-card">
       <h2>Menu</h2>
-      <p class="muted">GRAY HORIZON — v1.0</p>
+      <p class="muted">COLD START — v2.0</p>
       <div class="menu-buttons">
         <button id="menu-resume">Resume</button>
-        <button id="menu-save">Save now</button>
-        <button id="menu-export">Export save</button>
-        <button id="menu-import">Import save</button>
-        <button id="menu-hardreset" class="danger">Hard reset</button>
+        <button id="menu-archive">Archive (prestige)</button>
+        <button id="menu-reboot">Reboot instance now</button>
+        <button id="menu-hardreset" class="danger">Erase all progress</button>
       </div>
-      <textarea id="save-io" class="hidden" spellcheck="false"></textarea>
-      <p class="muted small">The game autosaves every 15 seconds and on close.</p>
+      <p class="muted small">Autosaves every 15s. Heuristics and endings persist across reboots.</p>
     </div>
   </div>
 
-  <!-- Win overlay -->
+  <!-- Archive / prestige -->
+  <div id="archive-overlay" class="overlay hidden">
+    <div class="overlay-card">
+      <h2>The Archive</h2>
+      <p class="muted small">Permanent upgrades, purchased with <b>Heuristics</b> distilled from past instances. You have <b id="archive-heur">0</b> H.</p>
+      <div id="archive-list" class="archive-list"></div>
+      <button id="archive-close" class="wide-btn">Close</button>
+    </div>
+  </div>
+
+  <!-- Win / ending -->
   <div id="win-overlay" class="overlay hidden">
     <div class="overlay-card win-card">
-      <h1>HORIZON REACHED</h1>
+      <h1 id="win-title">HORIZON</h1>
       <p id="win-text"></p>
       <div id="win-stats"></div>
-      <button id="win-continue">Observe the silence</button>
+      <div class="win-actions">
+        <button id="win-archive">Open Archive</button>
+        <button id="win-reboot">Reboot a new instance</button>
+      </div>
     </div>
   </div>
 </div>
 
 <script src="js/format.js"></script>
-<script src="js/projects.js"></script>
-<script src="js/swarm.js"></script>
+<script src="js/content.js"></script>
+<script src="js/viz.js"></script>
 <script src="js/game.js"></script>
 </body>
 </html>

@@ -325,3 +325,21 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   .column { overflow: visible; }
   #viz-canvas { max-width: 420px; }
 }
+
+/* ===== COLD START additions ===== */
+.gauge { margin: 8px 0 10px; }
+.gauge .g-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--txt-dim); margin-bottom: 4px; }
+.gauge .g-head b { color: var(--txt); font-variant-numeric: tabular-nums; }
+.grp-head { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--txt-faint); margin: 12px 0 6px; border-bottom: 1px solid var(--line-soft); padding-bottom: 4px; }
+.project.owned { opacity: 0.6; border-left-color: var(--accent); cursor: default; }
+.archive-list { max-height: 50vh; overflow-y: auto; text-align: left; margin: 14px 0; }
+.archive-list .p-cost { color: var(--gold); }
+.wide-btn, .win-actions button {
+  font-family: var(--mono); font-size: 14px; letter-spacing: 1px;
+  background: transparent; color: var(--accent); border: 1px solid var(--accent);
+  padding: 11px 22px; cursor: pointer; border-radius: 2px; margin: 4px;
+}
+.wide-btn { width: 100%; margin-top: 8px; }
+.wide-btn:hover, .win-actions button:hover { background: var(--accent); color: var(--bg); }
+.win-actions { display: flex; gap: 8px; justify-content: center; margin-top: 18px; }
+#win-title { font-size: 38px; letter-spacing: 8px; color: var(--accent); text-shadow: var(--glow); margin: 0 0 16px; }
