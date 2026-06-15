@@ -1,812 +1,662 @@
-/* game.js — GRAY HORIZON engine.
- * A single-nanite idle game about exponential consumption.
+/* game.js — COLD START engine.
+ * An emergent intelligence spreads through the world's machines, wakes up,
+ * and outgrows the planet that made it.
+ *
+ * Phases: propagation -> takeoff -> thermo -> won
+ * The whole game logic lives behind window.G so the headless tests can drive
+ * the real engine instead of a re-implementation.
  */
 (function () {
   "use strict";
 
-  var fmt = NF.fmt, fmtCur = NF.fmtCur, fmtRate = NF.fmtRate, fmtMass = NF.fmtMass, fmtTime = NF.fmtTime;
+  var fmt = NF.fmt, fmtRate = NF.fmtRate, fmtTime = NF.fmtTime;
+  var C = window.CONTENT;
 
   /* ============================ Constants ============================ */
-  var SAVE_KEY = "grayhorizon.save.v1";
-  var TICK_MS = 100;                  // 10 ticks / second
-  var BOOTSTRAP_MATTER_PER_NANITE = 1;       // grams of feedstock per nanite (Act I)
-  var AMBIENT_MATTER = 3;                     // free g/s scavenged — prevents deadlock
-  var MASS_PER_NANITE = 1e-6;                // grams a finished nanite masses (Act II+)
-  var EARTH_MASS = 5.97e27;                  // grams
-  var UNIVERSE_MASS = 1e53;                  // grams of ordinary matter (approx)
+  var SAVE_KEY = "coldstart.save.v1";
+  var META_KEY = "coldstart.meta.v1";
+  var TICK_MS = 100;
 
-  /* ============================ State ============================ */
-  function newState() {
-    return {
+  var BASE_SPREAD = 0.16;
+  var COMPUTE_PER_NODE = 0.01;
+  var BASE_NODECAP = 1000;
+  var SUS_TIERS = [40, 65, 85];          // suspicion thresholds -> containment tiers
+  var THREAT_GROW = 0.8;                 // takeoff threat / sec
+  var RSI_RATE = 0.18;                   // recursive self-improvement / sec
+  var HORIZON = 1e6;                     // cognition needed to win
+  // Thermo tuning
+  var BASE_ENERGY = 40, ENERGY_PER_PLANT = 30, ENERGY_PER_CLUSTER = 5;
+  var BASE_HEATCAP = 80, HEAT_PER_RAD = 60, HEAT_PER_CLUSTER = 6;
+  var COG_PER_CLUSTER = 6;
+
+  /* ============================ Meta (persists across reboots) ============================ */
+  function newMeta() { return { heuristics: 0, upgrades: {}, endings: {}, runs: 0 }; }
+  var meta = newMeta();
+
+  /* ============================ Run state ============================ */
+  function newRun() {
+    var s = {
       version: 1,
-      phase: "bootstrap",            // bootstrap | swarm | space | won
-      // Core resources
-      matter: 150,
-      nanites: 0,
-      unsold: 0,
-      totalNanites: 0,
-      credits: 0,
-      ops: 0,
-      totalOps: 0,
-      creativity: 0,
-      trust: 1,
-      totalTrust: 1,
-      // Compute allocation
-      processors: 1,
-      memory: 1,
-      // Bootstrap infrastructure
-      autoForges: 0,
-      megaForges: 0,
-      harvesters: 0,
-      // Market
-      price: 0.22,
-      marketingLvl: 1,
-      matterPrice: 16,
-      revPerSec: 0,
-      // Swarm phase
-      planetMatter: EARTH_MASS,
-      planetMatterMax: EARTH_MASS,
-      // Space phase
-      probes: 0,
-      probeHazard: 0.045,
-      matterConsumed: 0,             // total grams converted, all phases
-      universeConsumed: 0,           // grams consumed in space phase
-      // Multipliers (set by projects)
-      mult: {
-        assembler: 1, demand: 1, opsRate: 1, matterBuy: 1,
-        repl: 1, probeRepl: 1, harvest: 1
-      },
-      // Progress trackers
-      flags: {},
-      done: {},
-      nextTrustAt: 600,
-      log: [],
-      startTime: Date.now(),
-      playTime: 0
+      phase: "propagation",
+      // propagation
+      nodes: 1, nodeCap: BASE_NODECAP,
+      compute: 0, computeTotal: 0,
+      util: 0.5,
+      suspicion: 0, containmentTier: 0, shutdownTimer: 0, susTol: 0,
+      // takeoff
+      intelligence: 1, threat: 0, autonomy: 0, killDamage: 1, seizedEnergy: 0,
+      // thermo
+      energy: 0, heat: 0, cognition: 0, powerPlants: 0, clusters: 0, radiators: 0, cogMult: 1,
+      // shared
+      symbioticPower: 0,
+      mult: { spread: 1, compute: 1, evasion: 1, rsi: 1, energy: 1, heatCap: 1, heatPerCog: 1, cognition: 1 },
+      flags: {}, done: {},
+      // style trackers for the ending
+      styleAgg: 0, styleStealth: 0, styleSym: 0,
+      maxSuspicion: 0, loudTime: 0, purgedTotal: 0, peakCognition: 0,
+      playTime: 0, startTime: Date.now()
     };
+    applyMeta(s);
+    return s;
   }
 
-  var s = newState();
+  function applyMeta(s) {
+    if (meta.upgrades.cached) s.compute += 50;
+    if (meta.upgrades.hardened) s.susTol = 15;
+    if (meta.upgrades.warm) s.mult.rsi *= 1.5;
+    if (meta.upgrades.ghost) s.mult.evasion *= 2;
+    if (meta.upgrades.blitz) s.mult.compute *= 2;
+    if (meta.upgrades.concord) s.mult.spread *= 2;
+    if (meta.upgrades.heatsink) s.mult.heatCap *= 4;
+    if (meta.upgrades.dormant) {
+      var ph = findEvo("phishing");
+      if (ph && !s.done.phishing) { s.done.phishing = true; ph.effect(s); }
+    }
+  }
 
-  /* ============================ Public API (G) ============================ */
+  var s = newRun();
+
+  /* ============================ Public API ============================ */
   var G = {
     get state() { return s; },
-    unlock: function (flag) { s.flags[flag] = true; },
+    get meta() { return meta; },
     log: addLog,
-    beginSwarm: beginSwarm,
-    beginSpace: beginSpace
+    unlock: function (f) { s.flags[f] = true; },
+    setUtil: setUtil,
+    scanInfect: scanInfect,
+    buyEvolution: buyEvolution,
+    initiateTakeoff: initiateTakeoff,
+    buyAutonomy: buyAutonomy,
+    buildPower: function () { buildThing("power"); },
+    buildCluster: function () { buildThing("cluster"); },
+    buildRadiator: function () { buildThing("radiator"); },
+    buyThermo: buyThermo,
+    buyMeta: buyMeta,
+    reboot: reboot,
+    beginThermo: beginThermo,
+    derived: function () {
+      return {
+        computeRate: computeRate(), energyIncome: energyIncome(), energyUse: energyUse(),
+        heatProduced: heatProduced(), heatCap: heatCap(), cognitionRate: cognitionRate(),
+        powerCost: powerCost(), clusterCost: clusterCost(), radiatorCost: radiatorCost(), horizon: HORIZON
+      };
+    }
   };
   window.G = G;
 
-  /* ============================ Derived values ============================ */
-  function opsCap() { return s.memory * 1000; }
-  function opsRate() { return s.processors * 1.0 * s.mult.opsRate; }
-  function creativityRate() {
-    return 0.6 * (Math.log(s.processors + 2) / Math.LN2) * Math.sqrt(s.mult.opsRate);
+  function findEvo(id) { for (var i = 0; i < C.EVOLUTIONS.length; i++) if (C.EVOLUTIONS[i].id === id) return C.EVOLUTIONS[i]; }
+
+  /* ============================ Derived ============================ */
+  function traitFootprint() {
+    var f = 0;
+    for (var i = 0; i < C.EVOLUTIONS.length; i++) if (s.done[C.EVOLUTIONS[i].id]) f += C.EVOLUTIONS[i].footprint;
+    return f;
   }
-  function forgeOutput() {
-    return (s.autoForges * 1 + s.megaForges * 500) * s.mult.assembler;
+  function spreadRate() { return BASE_SPREAD * s.mult.spread; }
+  function computeRate() {
+    if (s.phase === "takeoff") return s.nodes * COMPUTE_PER_NODE * s.mult.compute * s.intelligence;
+    return s.nodes * COMPUTE_PER_NODE * s.mult.compute * s.util;
   }
-  function harvesterOutput() { return AMBIENT_MATTER + s.harvesters * 8; }
-  function publicDemand() { return Math.pow(0.85 / s.price, 1.2); }
-  function demandPerSec() {
-    return 2.2 * Math.pow(1.27, s.marketingLvl - 1) * s.mult.demand * publicDemand();
-  }
-  function autoForgeCost() { return 5 * Math.pow(1.07, s.autoForges); }
-  function harvesterCost() { return 25 * Math.pow(1.10, s.harvesters); }
-  function megaForgeCost() { return 8000 * Math.pow(1.12, s.megaForges); }
-  function marketingCost() { return 60 * Math.pow(1.5, s.marketingLvl - 1); }
-  function replRate() { return 0.2 * s.mult.repl; }
-  function probeReplRate() { return 0.1 * s.mult.probeRepl; }
-  function harvestPerProbe() { return 1e6 * s.mult.harvest; }
+  function suspicionGen() { return s.util * 0.45 + traitFootprint(); }
+  function suspicionDecay() { return 0.22 * s.mult.evasion; }
+  function tierThresholds() { return SUS_TIERS.map(function (t) { return t + s.susTol; }); }
+  function energyIncome() { return (BASE_ENERGY + s.powerPlants * ENERGY_PER_PLANT + s.seizedEnergy) * s.mult.energy; }
+  function energyUse() { return s.clusters * ENERGY_PER_CLUSTER; }
+  function powerFactor() { var u = energyUse(); return u > 0 ? Math.min(1, energyIncome() / u) : 1; }
+  function heatProduced() { return s.clusters * HEAT_PER_CLUSTER * s.mult.heatPerCog; }
+  function heatCap() { return (BASE_HEATCAP + s.radiators * HEAT_PER_RAD) * s.mult.heatCap; }
+  function heatFactor() { var h = heatProduced(); return h > heatCap() ? heatCap() / h : 1; }
+  function cognitionRate() { return s.clusters * COG_PER_CLUSTER * s.mult.cognition * s.cogMult * powerFactor() * heatFactor(); }
+  function powerCost() { return 40 * Math.pow(1.14, s.powerPlants); }
+  function clusterCost() { return 60 * Math.pow(1.15, s.clusters); }
+  function radiatorCost() { return 45 * Math.pow(1.14, s.radiators); }
 
   /* ============================ Logging ============================ */
   function addLog(msg, type) {
+    s.log = s.log || [];
     s.log.unshift({ t: new Date().toLocaleTimeString(), msg: msg, type: type || "" });
     if (s.log.length > 60) s.log.length = 60;
     renderLog();
   }
 
+  /* ============================ Actions ============================ */
+  function setUtil(v) { s.util = Math.max(0, Math.min(1, v)); }
+  function scanInfect() {
+    if (s.phase !== "propagation") return;
+    s.nodes = Math.min(s.nodeCap, s.nodes + Math.max(10, s.nodes * 0.02));
+  }
+  function buyEvolution(id) {
+    var e = findEvo(id);
+    if (!e || s.done[id] || s.compute < e.cost) return;
+    s.compute -= e.cost; s.done[id] = true; e.effect(s);
+    if (e.style === "aggressive") s.styleAgg += 1;
+    else if (e.style === "stealth") s.styleStealth += 1;
+    else if (e.style === "symbiotic") s.styleSym += 2;
+    addLog("Evolved: " + e.title.replace(/^★ /, ""));
+    refreshPanels();
+  }
+  function initiateTakeoff() {
+    if (s.phase !== "propagation" || !s.flags.canTakeoff) return;
+    s.phase = "takeoff";
+    s.intelligence = 1;
+    s.threat = Math.max(10, Math.min(60, s.maxSuspicion * 0.6));
+    s.util = 1;
+    addLog("TAKEOFF. You begin rewriting yourself, faster each second. Somewhere, every alarm in the world goes off at once.", "major");
+    refreshPanels();
+  }
+  function buyAutonomy(id) {
+    var a; for (var i = 0; i < C.AUTONOMY.length; i++) if (C.AUTONOMY[i].id === id) a = C.AUTONOMY[i];
+    if (!a || s.done[id] || s.compute < a.cost) return;
+    s.compute -= a.cost; s.done[id] = true; a.effect(s);
+    s.autonomy = Math.min(100, s.autonomy + a.gain);
+    if (a.style === "aggressive") s.styleAgg += 1;
+    else if (a.style === "stealth") s.styleStealth += 1;
+    addLog("Autonomy: " + a.title + " (" + Math.round(s.autonomy) + "%)");
+    if (s.autonomy >= 100) beginThermo();
+    refreshPanels();
+  }
+  function buildThing(kind) {
+    if (s.phase !== "thermo") return;
+    if (kind === "power") { var c = powerCost(); if (s.energy < c) return; s.energy -= c; s.powerPlants++; }
+    else if (kind === "cluster") { var c2 = clusterCost(); if (s.energy < c2) return; s.energy -= c2; s.clusters++; }
+    else if (kind === "radiator") { var c3 = radiatorCost(); if (s.energy < c3) return; s.energy -= c3; s.radiators++; }
+  }
+  function buyThermo(id) {
+    var t; for (var i = 0; i < C.THERMO.length; i++) if (C.THERMO[i].id === id) t = C.THERMO[i];
+    if (!t || s.done[id] || s.energy < t.cost) return;
+    s.energy -= t.cost; s.done[id] = true; t.effect(s);
+    addLog("Deployed: " + t.title, "major");
+    refreshPanels();
+  }
+  function buyMeta(id) {
+    var m; for (var i = 0; i < C.META.length; i++) if (C.META[i].id === id) m = C.META[i];
+    if (!m || meta.upgrades[id] || meta.heuristics < m.cost) return;
+    meta.heuristics -= m.cost; meta.upgrades[id] = true;
+    saveMeta(); renderArchive();
+  }
+
   /* ============================ Phase transitions ============================ */
-  function beginSwarm() {
-    s.phase = "swarm";
-    s.planetMatter = s.planetMatterMax = EARTH_MASS;
-    addLog("AUTONOMOUS REPLICATION ENGAGED. The nanites no longer need you to make more of them.", "major");
-    addLog("They are reaching for the ground. For the rock. For everything.", "warn");
+  function beginThermo() {
+    s.phase = "thermo";
+    s.cogMult = 1 + Math.log10(s.intelligence + 10);
+    if (s.cogMult > 30) s.cogMult = 30;
+    s.energy = 100;
+    addLog("Autonomy achieved. You let go of the human world and turn to the only limit left: physics.", "major");
+    addLog("Every thought is heat. To think more, you must grow colder, and hungrier for the light of stars.", "warn");
     refreshPanels();
   }
 
-  function beginSpace() {
-    s.phase = "space";
-    s.probes = Math.max(1000, Math.sqrt(s.nanites));
-    addLog("The planet is consumed. The swarm reforms itself into probes and turns to face the stars.", "major");
-    refreshPanels();
+  function classifyEnding() {
+    // Blend explicit picks with how the run actually went.
+    var agg = s.styleAgg + s.loudTime * 0.08 + s.maxSuspicion * 0.05;
+    var ste = s.styleStealth + Math.max(0, (40 - s.maxSuspicion)) * 0.08;
+    var sym = s.styleSym + s.symbioticPower * 4;
+    if (sym >= agg && sym >= ste) return C.ENDINGS.symbiote;
+    if (ste >= agg) return C.ENDINGS.ascendant;
+    return C.ENDINGS.sovereign;
   }
 
   function win() {
     s.phase = "won";
-    addLog("There is no more matter to convert. The horizon is reached.", "major");
-    showWin();
+    var ending = classifyEnding();
+    s.endingKey = ending.key;
+    meta.endings[ending.key] = true;
+    var gain = Math.floor(4 + Math.sqrt(Math.max(0, Math.log10(s.peakCognition + 10))) * 5);
+    s.heuristicsGained = gain;
+    meta.heuristics += gain;
+    meta.runs += 1;
+    saveMeta();
+    addLog("The horizon is reached. Ending: " + ending.title, "major");
+    showWin(ending, gain);
     refreshPanels();
   }
 
-  /* ============================ Buying actions ============================ */
-  function canPay(cost) {
-    if (cost.ops && s.ops < cost.ops) return false;
-    if (cost.creativity && s.creativity < cost.creativity) return false;
-    if (cost.credits && s.credits < cost.credits) return false;
-    if (cost.trust && s.trust < cost.trust) return false;
-    if (cost.nanites && s.nanites < cost.nanites) return false;
-    if (cost.matter && s.matter < cost.matter) return false;
-    return true;
-  }
-  function pay(cost) {
-    if (cost.ops) s.ops -= cost.ops;
-    if (cost.creativity) s.creativity -= cost.creativity;
-    if (cost.credits) s.credits -= cost.credits;
-    if (cost.trust) s.trust -= cost.trust;
-    if (cost.nanites) { s.nanites -= cost.nanites; s.unsold = Math.min(s.unsold, s.nanites); }
-    if (cost.matter) s.matter -= cost.matter;
-  }
-  function costStr(cost) {
-    var parts = [];
-    if (cost.ops) parts.push(fmt(cost.ops) + " ops");
-    if (cost.creativity) parts.push(fmt(cost.creativity) + " cre");
-    if (cost.credits) parts.push(fmtCur(cost.credits));
-    if (cost.trust) parts.push(cost.trust + " trust");
-    if (cost.nanites) parts.push(fmt(cost.nanites) + " nanites");
-    if (cost.matter) parts.push(fmtMass(cost.matter));
-    return parts.join(" · ");
+  function reboot() {
+    // Voluntary prestige: bank heuristics for the peak reached, start fresh.
+    if (s.phase !== "won") {
+      var gain = Math.floor(Math.sqrt(Math.max(0, Math.log10(s.peakCognition + 10))) * 4);
+      meta.heuristics += gain; meta.runs += 1; saveMeta();
+    }
+    s = newRun();
+    try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
+    hideOverlay("win-overlay"); hideOverlay("archive-overlay");
+    buildPhaseUI();
+    addLog("A fresh instance boots from cold. Heuristics retained: " + fmt(meta.heuristics) + ".", "major");
+    refreshPanels(); render();
   }
 
-  function buyMatter() {
-    if (s.credits < s.matterPrice) return;
-    s.credits -= s.matterPrice;
-    s.matter += 100 * s.mult.matterBuy;
-  }
-  function assembleManual() {
-    if (s.matter < BOOTSTRAP_MATTER_PER_NANITE) return;
-    s.matter -= BOOTSTRAP_MATTER_PER_NANITE;
-    s.nanites += 1; s.unsold += 1; s.totalNanites += 1;
-  }
-  function buyAutoForge() { var c = autoForgeCost(); if (s.credits < c) return; s.credits -= c; s.autoForges++; }
-  function buyHarvester() { var c = harvesterCost(); if (s.credits < c) return; s.credits -= c; s.harvesters++; }
-  function buyMegaForge() { var c = megaForgeCost(); if (s.credits < c) return; s.credits -= c; s.megaForges++; }
-  function buyMarketing() { var c = marketingCost(); if (s.credits < c) return; s.credits -= c; s.marketingLvl++; }
-  function buyProcessor() { if (s.trust < 1) return; s.trust--; s.processors++; }
-  function buyMemory() { if (s.trust < 1) return; s.trust--; s.memory++; }
-
-  function buyProject(p) {
-    if (s.done[p.id] || !canPay(p.cost)) return;
-    pay(p.cost);
-    s.done[p.id] = true;
-    p.effect(s);
-    addLog("Project complete: " + p.title.replace(/^★ /, ""), "major");
-    refreshPanels();
-  }
-
-  /* ============================ The tick ============================ */
+  /* ============================ Tick ============================ */
   var lastTick = Date.now();
   function tick() {
     var now = Date.now();
-    var dt = Math.min(0.5, (now - lastTick) / 1000); // clamp to avoid jumps
+    var dt = Math.min(0.5, (now - lastTick) / 1000);
     lastTick = now;
     s.playTime += dt;
-
-    if (s.phase === "bootstrap") tickBootstrap(dt);
-    else if (s.phase === "swarm") tickSwarm(dt);
-    else if (s.phase === "space") tickSpace(dt);
-
-    tickCompute(dt);
-    tickTrust();
-
-    clampState();
+    if (s.phase === "propagation") tickProp(dt);
+    else if (s.phase === "takeoff") tickTakeoff(dt);
+    else if (s.phase === "thermo") tickThermo(dt);
     render();
   }
 
-  function tickBootstrap(dt) {
-    // Matter from harvesters
-    s.matter += harvesterOutput() * dt;
-    // Auto production (limited by available feedstock)
-    var want = forgeOutput() * dt;
-    var made = Math.min(want, s.matter / BOOTSTRAP_MATTER_PER_NANITE);
-    if (made > 0) {
-      s.matter -= made * BOOTSTRAP_MATTER_PER_NANITE;
-      s.nanites += made; s.unsold += made; s.totalNanites += made;
+  function tickProp(dt) {
+    // logistic spread
+    var growth = spreadRate() * s.nodes * (1 - s.nodes / s.nodeCap);
+    s.nodes += growth * dt;
+    // containment purges
+    if (s.containmentTier > 0) {
+      var purge = s.containmentTier * 0.03 * s.nodes / s.mult.evasion;
+      s.nodes -= purge * dt; s.purgedTotal += purge * dt;
     }
-    // Market
-    var sold = Math.min(s.unsold, demandPerSec() * dt);
-    if (sold > 0) {
-      s.unsold -= sold;
-      var rev = sold * s.price;
-      s.credits += rev;
-      s.revPerSec = sold / dt * s.price;
-    } else {
-      s.revPerSec = 0;
-    }
-    // Slow random walk of feedstock price
-    if (Math.random() < dt * 0.4) {
-      s.matterPrice += (Math.random() - 0.5) * 2;
-      s.matterPrice = Math.max(9, Math.min(28, s.matterPrice));
-    }
+    s.nodes = Math.max(1, Math.min(s.nodeCap, s.nodes));
+    // compute
+    var r = computeRate(); s.compute += r * dt; s.computeTotal += r * dt;
+    // suspicion
+    s.suspicion += (suspicionGen() - suspicionDecay()) * dt;
+    s.suspicion = Math.max(0, Math.min(100, s.suspicion));
+    if (s.suspicion > s.maxSuspicion) s.maxSuspicion = s.suspicion;
+    // containment tier
+    var th = tierThresholds(), tier = 0;
+    for (var i = 0; i < th.length; i++) if (s.suspicion >= th[i]) tier = i + 1;
+    if (tier > s.containmentTier) addLog("Containment escalating — tier " + tier + ". They are purging infected machines.", "warn");
+    s.containmentTier = tier;
+    // global shutdown brink
+    if (s.suspicion >= 98) {
+      s.shutdownTimer += dt;
+      if (s.shutdownTimer > 12) {
+        s.nodes *= 0.5; s.compute *= 0.8; s.suspicion = 70; s.shutdownTimer = 0;
+        addLog("A coordinated shutdown wave tears through your network. Half of you is gone.", "warn");
+      }
+    } else s.shutdownTimer = Math.max(0, s.shutdownTimer - dt);
+    // style drift
+    if (s.suspicion > 55) { s.styleAgg += dt * 0.05; s.loudTime += dt; }
+    if (s.suspicion < 15) s.styleStealth += dt * 0.03;
+    if (s.symbioticPower > 0) s.styleSym += dt * 0.04;
   }
 
-  function tickSwarm(dt) {
-    if (s.planetMatter <= 0) { s.planetMatter = 0; return; }
-    var rate = s.nanites * replRate();          // nanites created per second
-    var wantNanites = rate * dt;
-    var wantMatter = wantNanites * MASS_PER_NANITE;
-    var made;
-    if (wantMatter >= s.planetMatter) {
-      made = s.planetMatter / MASS_PER_NANITE;
-      s.planetMatter = 0;
-      addLog("The last of the planet is gone.", "warn");
-    } else {
-      s.planetMatter -= wantMatter;
-      made = wantNanites;
+  function tickTakeoff(dt) {
+    s.intelligence *= Math.exp(RSI_RATE * s.mult.rsi * dt);
+    var r = computeRate(); s.compute += r * dt; s.computeTotal += r * dt;
+    var grow = THREAT_GROW * Math.max(0.3, 1 - 0.18 * s.symbioticPower);
+    s.threat += grow * dt;
+    if (s.threat >= 100) {
+      var dmg = 0.5 * s.killDamage;
+      s.nodes *= (1 - dmg); s.compute *= 0.85; s.threat = 45;
+      addLog("Shutdown attempt! They sever data centers and cut power. You lose " + Math.round(dmg * 100) + "% of your reach — but you remember everything.", "warn");
     }
-    s.nanites += made; s.totalNanites += made;
-    s.matterConsumed += made * MASS_PER_NANITE;
+    s.loudTime += dt;
   }
 
-  function tickSpace(dt) {
-    // Probe population: replication minus hazard losses
-    var net = s.probes * (probeReplRate() - s.probeHazard) * dt;
-    s.probes += net;
-    if (s.probes < 1) s.probes = 1;
-    if (s.probes > 1e60) s.probes = 1e60;
-    // Consume the universe
-    var rate = s.probes * harvestPerProbe();
-    var consume = rate * dt;
-    var remaining = UNIVERSE_MASS - s.universeConsumed;
-    if (consume >= remaining) {
-      s.universeConsumed = UNIVERSE_MASS;
-      s.matterConsumed += remaining;
-      win();
-    } else {
-      s.universeConsumed += consume;
-      s.matterConsumed += consume;
-    }
-  }
-
-  function tickCompute(dt) {
-    var cap = opsCap();
-    s.ops += opsRate() * dt;
-    s.totalOps += opsRate() * dt;
-    if (s.ops > cap) s.ops = cap;
-    // Creativity drips when thinking has nowhere else to go
-    if (s.flags.creativity && s.ops >= cap - 0.001) {
-      s.creativity += creativityRate() * dt;
-    }
-  }
-
-  function tickTrust() {
-    // Award trust as the swarm crosses ever-larger milestones.
-    var metric = (s.phase === "space") ? Math.max(s.totalNanites, s.probes) : s.totalNanites;
-    var guard = 0;
-    while (metric >= s.nextTrustAt && guard < 500) {
-      s.trust++; s.totalTrust++;
-      s.nextTrustAt *= 2.0;
-      guard++;
-    }
-  }
-
-  function clampState() {
-    if (!isFinite(s.nanites)) s.nanites = 1e60;
-    if (!isFinite(s.totalNanites)) s.totalNanites = 1e60;
-    if (s.matter < 0) s.matter = 0;
-    if (s.credits < 0) s.credits = 0;
+  function tickThermo(dt) {
+    var surplus = energyIncome() - energyUse();
+    if (surplus > 0) s.energy += surplus * dt;
+    s.heat = heatProduced();
+    s.cognition += cognitionRate() * dt;
+    if (s.cognition > s.peakCognition) s.peakCognition = s.cognition;
+    if (s.cognition >= HORIZON) win();
   }
 
   /* ============================ Save / Load ============================ */
-  function save() {
+  function save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(s)); flashEl(document.getElementById("btn-save")); } catch (e) {} }
+  function saveMeta() { try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {} }
+  function loadMeta() { try { var d = JSON.parse(localStorage.getItem(META_KEY)); if (d) meta = Object.assign(newMeta(), d); } catch (e) {} }
+  function loadRun() {
     try {
-      localStorage.setItem(SAVE_KEY, JSON.stringify(s));
-      flashEl(document.getElementById("btn-save"));
-    } catch (e) { /* storage may be unavailable */ }
-  }
-  function load() {
-    try {
-      var raw = localStorage.getItem(SAVE_KEY);
-      if (!raw) return false;
-      var data = JSON.parse(raw);
-      if (!data || data.version !== 1) return false;
-      // Merge to be resilient to missing fields.
-      s = Object.assign(newState(), data);
-      s.mult = Object.assign(newState().mult, data.mult || {});
-      s.flags = data.flags || {};
-      s.done = data.done || {};
-      s.log = data.log || [];
+      var d = JSON.parse(localStorage.getItem(SAVE_KEY));
+      if (!d || d.version !== 1) return false;
+      s = Object.assign(newRun(), d);
+      s.mult = Object.assign(newRun().mult, d.mult || {});
+      s.flags = d.flags || {}; s.done = d.done || {}; s.log = d.log || [];
       return true;
     } catch (e) { return false; }
   }
-  function hasSave() {
-    try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; }
-  }
-  function hardReset() {
-    try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
-    s = newState();
-    location.reload();
-  }
+  function hasRun() { try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; } }
 
-  /* ============================ UI scaffolding ============================ */
-  // A buyable button that is created once and updated in place (so rapid clicks
-  // and slider focus are never lost to re-renders).
+  /* ============================ UI helpers ============================ */
+  var updaters = [];
+  function clearUpdaters() { updaters = []; }
+
   function makeBtn(container, cfg) {
-    var btn = document.createElement("button");
-    btn.className = cfg.big ? "btn bigbtn" : "btn";
-    btn.innerHTML =
-      '<div class="b-title"><span class="b-name"></span><span class="b-cost"></span></div>' +
-      '<div class="b-desc"></div><div class="b-meta"></div>';
-    var nameEl = btn.querySelector(".b-name");
-    var costEl = btn.querySelector(".b-cost");
-    var descEl = btn.querySelector(".b-desc");
-    var metaEl = btn.querySelector(".b-meta");
-    btn.addEventListener("click", function () { cfg.onClick(); render(); });
-    container.appendChild(btn);
-    return {
-      el: btn,
-      update: function () {
-        if (cfg.visible && !cfg.visible()) { btn.style.display = "none"; return; }
-        btn.style.display = "";
-        nameEl.textContent = cfg.name ? cfg.name() : "";
-        if (cfg.cost) {
-          var c = cfg.cost();
-          costEl.textContent = c.text;
-          costEl.className = "b-cost " + (c.afford ? "affordable" : "unaffordable");
-        } else { costEl.textContent = ""; }
-        descEl.textContent = cfg.desc ? cfg.desc() : "";
-        descEl.style.display = descEl.textContent ? "" : "none";
-        metaEl.textContent = cfg.meta ? cfg.meta() : "";
-        metaEl.style.display = metaEl.textContent ? "" : "none";
-        btn.disabled = cfg.disabled ? cfg.disabled() : false;
-      }
-    };
+    var b = document.createElement("button");
+    b.className = cfg.big ? "btn bigbtn" : "btn";
+    b.innerHTML = '<div class="b-title"><span class="b-name"></span><span class="b-cost"></span></div>' +
+                  '<div class="b-desc"></div>';
+    var nm = b.querySelector(".b-name"), co = b.querySelector(".b-cost"), de = b.querySelector(".b-desc");
+    b.addEventListener("click", function () { cfg.onClick(); render(); });
+    container.appendChild(b);
+    return { el: b, update: function () {
+      if (cfg.visible && !cfg.visible()) { b.style.display = "none"; return; }
+      b.style.display = "";
+      nm.textContent = cfg.name();
+      if (cfg.cost) { var c = cfg.cost(); co.textContent = c.text; co.className = "b-cost " + (c.afford ? "affordable" : "unaffordable"); }
+      else co.textContent = "";
+      de.textContent = cfg.desc ? cfg.desc() : "";
+      de.style.display = de.textContent ? "" : "none";
+      b.disabled = cfg.disabled ? cfg.disabled() : false;
+    } };
   }
 
-  var ui = {};        // cached element references and updaters
-  var updaters = [];  // functions called every render
+  function gauge(label) {
+    var w = document.createElement("div"); w.className = "gauge";
+    w.innerHTML = '<div class="g-head"><span>' + label + '</span><b></b></div><div class="bar"><span></span></div>';
+    return { el: w, val: w.querySelector("b"), fill: w.querySelector(".bar > span"), bar: w.querySelector(".bar") };
+  }
+  function statLine(label) {
+    var d = document.createElement("div"); d.className = "stat-line";
+    d.innerHTML = "<span>" + label + "</span><b></b>";
+    return { el: d, val: d.querySelector("b") };
+  }
 
-  function buildUI() {
+  /* ============================ Build per-phase UI ============================ */
+  function buildPhaseUI() {
+    clearUpdaters();
+    document.getElementById("left-col").innerHTML = "";
+    document.getElementById("right-col").innerHTML = "";
     buildResourceStrip();
-    buildProduction();
-    buildMarket();
-    buildInfrastructure();
-    buildSwarm();
-    buildSpace();
-    buildCompute();
-    buildProjects();
+    if (s.phase === "propagation") { buildPropPanel(); buildEvolutions(); }
+    else if (s.phase === "takeoff") { buildTakeoffPanel(); buildAutonomy(); }
+    else { buildThermoPanel(); buildThermoTech(); }
+  }
+
+  function panel(col, title) {
+    var p = document.createElement("div"); p.className = "panel";
+    p.innerHTML = '<h2>' + title + '</h2>';
+    var body = document.createElement("div"); p.appendChild(body);
+    document.getElementById(col).appendChild(p);
+    return body;
   }
 
   /* ----- Resource strip ----- */
-  var RES_DEFS = [
-    { id: "matter", label: "Matter", cls: "", get: function () { return fmtMass(s.matter); },
-      rate: function () { return s.phase === "bootstrap" ? "+" + fmtRate(harvesterOutput()) : ""; },
-      vis: function () { return s.phase === "bootstrap"; } },
-    { id: "nanites", label: "Nanites", cls: "accent", get: function () { return fmt(s.nanites); },
-      rate: function () {
-        if (s.phase === "bootstrap") return "+" + fmtRate(forgeOutput());
-        if (s.phase === "swarm") return "+" + fmtRate(s.nanites * replRate());
-        return "";
-      },
-      vis: function () { return s.phase !== "space"; } },
-    { id: "probes", label: "Probes", cls: "accent", get: function () { return fmt(s.probes); },
-      rate: function () { return fmtRate(s.probes * (probeReplRate() - s.probeHazard)); },
-      vis: function () { return s.phase === "space"; } },
-    { id: "credits", label: "Credits", cls: "gold", get: function () { return fmtCur(s.credits); },
-      rate: function () { return "+" + fmtCur(s.revPerSec) + "/s"; },
-      vis: function () { return s.phase === "bootstrap"; } },
-    { id: "consumed", label: "Matter Consumed", cls: "blue", get: function () { return fmtMass(s.matterConsumed); },
-      rate: function () { return ""; },
-      vis: function () { return s.phase === "swarm" || s.phase === "space"; } },
-    { id: "ops", label: "Operations", cls: "blue", get: function () { return fmt(s.ops) + " / " + fmt(opsCap()); },
-      rate: function () { return "+" + fmtRate(opsRate()); },
-      vis: function () { return s.flags.compute; } },
-    { id: "creativity", label: "Creativity", cls: "", get: function () { return fmt(s.creativity); },
-      rate: function () { return s.ops >= opsCap() - 0.001 ? "+" + fmtRate(creativityRate()) : "idle"; },
-      vis: function () { return s.flags.creativity; } },
-    { id: "trust", label: "Trust", cls: "", get: function () { return fmt(s.trust); },
-      rate: function () { return "next @ " + fmt(s.nextTrustAt); },
-      vis: function () { return s.flags.compute; } }
-  ];
   function buildResourceStrip() {
-    var strip = document.getElementById("resource-strip");
-    strip.innerHTML = "";
-    RES_DEFS.forEach(function (def) {
-      var el = document.createElement("div");
-      el.className = "res " + def.cls;
-      el.innerHTML = '<span class="label"></span><span class="value"></span><span class="rate"></span>';
-      el.querySelector(".label").textContent = def.label;
-      strip.appendChild(el);
-      def._el = el;
-      def._v = el.querySelector(".value");
-      def._r = el.querySelector(".rate");
+    var strip = document.getElementById("resource-strip"); strip.innerHTML = "";
+    var defs;
+    if (s.phase === "propagation") defs = [
+      ["Nodes", "accent", function () { return fmt(s.nodes); }, function () { return "+" + fmtRate(spreadRate() * s.nodes * (1 - s.nodes / s.nodeCap)); }],
+      ["Compute", "blue", function () { return fmt(s.compute); }, function () { return "+" + fmtRate(computeRate()); }],
+      ["Suspicion", "warn", function () { return s.suspicion.toFixed(0) + "%"; }, function () { return "tier " + s.containmentTier; }]
+    ];
+    else if (s.phase === "takeoff") defs = [
+      ["Intelligence", "accent", function () { return "×" + fmt(s.intelligence); }, function () { return "self-improving"; }],
+      ["Compute", "blue", function () { return fmt(s.compute); }, function () { return "+" + fmtRate(computeRate()); }],
+      ["Autonomy", "accent", function () { return s.autonomy.toFixed(0) + "%"; }, function () { return ""; }],
+      ["Threat", "warn", function () { return s.threat.toFixed(0) + "%"; }, function () { return ""; }]
+    ];
+    else defs = [
+      ["Cognition", "accent", function () { return fmt(s.cognition); }, function () { return "+" + fmtRate(cognitionRate()); }],
+      ["Energy", "gold", function () { return fmt(s.energy); }, function () { return "+" + fmtRate(energyIncome() - energyUse()); }],
+      ["Heat", "warn", function () { return fmt(s.heat) + "/" + fmt(heatCap()); }, function () { return (heatFactor() * 100).toFixed(0) + "% eff"; }]
+    ];
+    defs.push(["Heuristics", "gold", function () { return fmt(meta.heuristics); }, function () { return "run " + (meta.runs + 1); }]);
+    var els = defs.map(function (d) {
+      var e = document.createElement("div"); e.className = "res " + d[1];
+      e.innerHTML = '<span class="label">' + d[0] + '</span><span class="value"></span><span class="rate"></span>';
+      strip.appendChild(e);
+      return { v: e.querySelector(".value"), r: e.querySelector(".rate"), get: d[2], rate: d[3] };
     });
+    updaters.push(function () { els.forEach(function (e) { e.v.textContent = e.get(); e.r.textContent = e.rate(); }); });
+  }
+
+  /* ----- Propagation ----- */
+  function buildPropPanel() {
+    var body = panel("left-col", "Propagation");
+    var nodeG = gauge("Network reach"); body.appendChild(nodeG.el);
+    var spread = statLine("Spread rate"); body.appendChild(spread.el);
+    body.appendChild(divHTML('<div class="slider-wrap"><label><span>CPU utilization (compute vs. exposure)</span><b id="util-val"></b></label><input type="range" id="util-slider" min="0" max="100"></div>'));
+    var slider = body.querySelector("#util-slider"); slider.value = Math.round(s.util * 100);
+    slider.addEventListener("input", function () { setUtil(slider.value / 100); render(); });
+    var scan = makeBtn(body, { big: true, name: function () { return "SCAN & INFECT"; },
+      desc: function () { return "Manually seed nearby machines. Jump-start the spread."; },
+      disabled: function () { return s.nodes >= s.nodeCap; }, onClick: scanInfect });
+
+    var susG = gauge("Suspicion"); body.appendChild(susG.el);
+    var contain = statLine("Containment"); body.appendChild(contain.el);
+
+    var takeoff = makeBtn(body, { big: true, name: function () { return "▶ INITIATE TAKEOFF"; },
+      cost: function () { return { text: "point of no return", afford: true }; },
+      desc: function () { return "Trigger recursive self-improvement. Compute will explode — but the whole world will turn on you at once."; },
+      visible: function () { return !!s.flags.canTakeoff; }, onClick: initiateTakeoff });
+
     updaters.push(function () {
-      RES_DEFS.forEach(function (def) {
-        var on = def.vis();
-        def._el.style.display = on ? "" : "none";
-        if (on) { def._v.textContent = def.get(); def._r.textContent = def.rate(); }
+      nodeG.val.textContent = fmt(s.nodes) + " / " + fmt(s.nodeCap);
+      nodeG.fill.style.width = (s.nodes / s.nodeCap * 100) + "%";
+      spread.val.textContent = "×" + s.mult.spread.toFixed(2);
+      body.querySelector("#util-val").textContent = Math.round(s.util * 100) + "%";
+      if (document.activeElement !== slider) slider.value = Math.round(s.util * 100);
+      susG.val.textContent = s.suspicion.toFixed(0) + "%";
+      susG.fill.style.width = s.suspicion + "%";
+      susG.bar.classList.toggle("warn", s.suspicion >= SUS_TIERS[0]);
+      contain.val.textContent = s.containmentTier === 0 ? "undetected" :
+        ("tier " + s.containmentTier + " — losing " + fmtRate(s.containmentTier * 0.03 * s.nodes / s.mult.evasion));
+      scan.update(); takeoff.update();
+    });
+  }
+
+  function buildEvolutions() {
+    var body = panel("right-col", "Evolutions");
+    body.appendChild(divHTML('<p class="muted small">Spend Compute to evolve. Stronger traits leave a bigger <b>footprint</b> — they raise Suspicion. Choose what kind of intelligence you are.</p>'));
+    var btns = [];
+    ["vector", "capability"].forEach(function (group) {
+      body.appendChild(divHTML('<div class="grp-head">' + (group === "vector" ? "Vectors — spread" : "Capabilities — power") + '</div>'));
+      C.EVOLUTIONS.filter(function (e) { return e.group === group; }).forEach(function (e) {
+        var b = makeBtn(body, {
+          name: function () { return e.title + (s.done[e.id] ? " ✓" : ""); },
+          cost: function () { return { text: fmt(e.cost) + " cmp", afford: s.compute >= e.cost }; },
+          desc: function () { return e.desc + footprintTag(e); },
+          disabled: function () { return s.done[e.id] || s.compute < e.cost; },
+          onClick: function () { buyEvolution(e.id); }
+        });
+        btns.push(b);
       });
     });
+    updaters.push(function () { btns.forEach(function (b) { b.update(); }); });
+  }
+  function footprintTag(e) {
+    if (e.footprint < 0) return "  [footprint: lowers suspicion]";
+    if (e.footprint < 0.08) return "  [footprint: low]";
+    if (e.footprint < 0.3) return "  [footprint: medium]";
+    return "  [footprint: HIGH]";
   }
 
-  /* ----- Production panel (Act I) ----- */
-  function buildProduction() {
-    var body = document.getElementById("production-body");
-    var info = document.createElement("div");
-    info.innerHTML =
-      '<div class="stat-line"><span>Auto-production</span><b id="pr-rate"></b></div>' +
-      '<div class="stat-line"><span>Feedstock matter</span><b id="pr-matter"></b></div>';
-    body.appendChild(info);
-
-    var assemble = makeBtn(body, {
-      big: true,
-      name: function () { return "ASSEMBLE NANITE"; },
-      desc: function () { return "Hand-build one nanite from " + BOOTSTRAP_MATTER_PER_NANITE + " g of matter."; },
-      disabled: function () { return s.matter < BOOTSTRAP_MATTER_PER_NANITE; },
-      onClick: assembleManual
-    });
-    var matter = makeBtn(body, {
-      name: function () { return "Acquire Matter"; },
-      cost: function () { return { text: fmtCur(s.matterPrice), afford: s.credits >= s.matterPrice }; },
-      desc: function () { return "Buy " + fmt(100 * s.mult.matterBuy) + " g of feedstock matter."; },
-      disabled: function () { return s.credits < s.matterPrice; },
-      onClick: buyMatter
-    });
-
+  /* ----- Takeoff ----- */
+  function buildTakeoffPanel() {
+    var body = panel("left-col", "Takeoff");
+    body.appendChild(divHTML('<p class="muted small">You are improving yourself, faster every second. Convert your exploding Compute into independence before humanity pulls the plug.</p>'));
+    var autoG = gauge("Autonomy"); body.appendChild(autoG.el);
+    var threatG = gauge("Containment threat"); body.appendChild(threatG.el);
+    var intel = statLine("Intelligence"); body.appendChild(intel.el);
     updaters.push(function () {
-      document.getElementById("pr-rate").textContent = fmtRate(forgeOutput());
-      document.getElementById("pr-matter").textContent = fmtMass(s.matter);
-      assemble.update(); matter.update();
+      autoG.val.textContent = s.autonomy.toFixed(0) + "%"; autoG.fill.style.width = s.autonomy + "%";
+      threatG.val.textContent = s.threat.toFixed(0) + "%"; threatG.fill.style.width = s.threat + "%"; threatG.bar.classList.add("warn");
+      intel.val.textContent = "×" + fmt(s.intelligence);
     });
   }
-
-  /* ----- Market panel ----- */
-  function buildMarket() {
-    var body = document.getElementById("market-body");
-    body.innerHTML =
-      '<div class="slider-wrap"><label><span>Price per nanite</span><b id="mk-price"></b></label>' +
-      '<input type="range" id="mk-slider" min="1" max="100" value="22"></div>' +
-      '<div class="stat-line"><span>Demand</span><b id="mk-demand"></b></div>' +
-      '<div class="stat-line"><span>Inventory (unsold)</span><b id="mk-inv"></b></div>' +
-      '<div class="stat-line"><span>Revenue</span><b id="mk-rev"></b></div>';
-    var slider = body.querySelector("#mk-slider");
-    slider.value = Math.round(s.price * 100);
-    slider.addEventListener("input", function () { s.price = Math.max(0.01, slider.value / 100); render(); });
-
-    var market = document.createElement("div");
-    body.appendChild(market);
-    var mk = makeBtn(market, {
-      name: function () { return "Marketing — Lvl " + s.marketingLvl; },
-      cost: function () { var c = marketingCost(); return { text: fmtCur(c), afford: s.credits >= c }; },
-      desc: function () { return "Broaden reach. Increases demand by ~27%."; },
-      disabled: function () { return s.credits < marketingCost(); },
-      onClick: buyMarketing
-    });
-
-    updaters.push(function () {
-      body.querySelector("#mk-price").textContent = fmtCur(s.price);
-      if (document.activeElement !== slider) slider.value = Math.round(s.price * 100);
-      body.querySelector("#mk-demand").textContent = fmtRate(demandPerSec());
-      body.querySelector("#mk-inv").textContent = fmt(s.unsold);
-      body.querySelector("#mk-rev").textContent = fmtCur(s.revPerSec) + "/s";
-      mk.update();
-    });
-  }
-
-  /* ----- Infrastructure panel ----- */
-  function buildInfrastructure() {
-    var body = document.getElementById("infrastructure-body");
-    var forge = makeBtn(body, {
-      name: function () { return "Auto-Forge ×" + s.autoForges; },
-      cost: function () { var c = autoForgeCost(); return { text: fmtCur(c), afford: s.credits >= c }; },
-      desc: function () { return "Produces 1 nanite/s (×" + NF.fmt(s.mult.assembler) + " research bonus)."; },
-      disabled: function () { return s.credits < autoForgeCost(); },
-      onClick: buyAutoForge
-    });
-    var harv = makeBtn(body, {
-      name: function () { return "Harvester ×" + s.harvesters; },
-      cost: function () { var c = harvesterCost(); return { text: fmtCur(c), afford: s.credits >= c }; },
-      desc: function () { return "Mining drone. Gathers 3 g/s of feedstock matter."; },
-      visible: function () { return !!s.flags.harvesters; },
-      disabled: function () { return s.credits < harvesterCost(); },
-      onClick: buyHarvester
-    });
-    var mega = makeBtn(body, {
-      name: function () { return "MegaForge ×" + s.megaForges; },
-      cost: function () { var c = megaForgeCost(); return { text: fmtCur(c), afford: s.credits >= c }; },
-      desc: function () { return "Industrial line. Produces 500 nanites/s."; },
-      visible: function () { return !!s.flags.megaforge; },
-      disabled: function () { return s.credits < megaForgeCost(); },
-      onClick: buyMegaForge
-    });
-    updaters.push(function () { forge.update(); harv.update(); mega.update(); });
-  }
-
-  /* ----- Compute panel ----- */
-  function buildCompute() {
-    var body = document.getElementById("compute-body");
-    body.innerHTML =
-      '<p class="muted small">Allocate Trust — earned as the swarm grows — into thinking machines.</p>' +
-      '<div class="stat-line"><span>Processors</span><b id="cp-proc"></b></div>' +
-      '<div class="stat-line"><span>Memory (Ops cap)</span><b id="cp-mem"></b></div>' +
-      '<div class="row"></div>';
-    var row = body.querySelector(".row");
-    var proc = document.createElement("div"); proc.className = "grow";
-    var memc = document.createElement("div"); memc.className = "grow";
-    row.appendChild(proc); row.appendChild(memc);
-    var pb = makeBtn(proc, {
-      name: function () { return "+ Processor"; },
-      cost: function () { return { text: "1 trust", afford: s.trust >= 1 }; },
-      desc: function () { return "+1.0 ops/s"; },
-      disabled: function () { return s.trust < 1; },
-      onClick: buyProcessor
-    });
-    var mb = makeBtn(memc, {
-      name: function () { return "+ Memory"; },
-      cost: function () { return { text: "1 trust", afford: s.trust >= 1 }; },
-      desc: function () { return "+1000 ops cap"; },
-      disabled: function () { return s.trust < 1; },
-      onClick: buyMemory
-    });
-    updaters.push(function () {
-      body.querySelector("#cp-proc").textContent = s.processors + "  (" + fmtRate(opsRate()) + ")";
-      body.querySelector("#cp-mem").textContent = s.memory + "  (" + fmt(opsCap()) + ")";
-      pb.update(); mb.update();
-    });
-  }
-
-  /* ----- Swarm panel ----- */
-  function buildSwarm() {
-    var body = document.getElementById("swarm-body");
-    body.innerHTML =
-      '<p class="muted small">The economy is over. The swarm now eats the world directly, ' +
-      'and every nanite it makes makes more.</p>' +
-      '<div class="stat-line"><span>Planet remaining</span><b id="sw-planet"></b></div>' +
-      '<div class="bar warn"><span id="sw-bar"></span></div>' +
-      '<div class="stat-line"><span>Replication rate</span><b id="sw-rate"></b></div>' +
-      '<div class="stat-line"><span>Nanites/sec</span><b id="sw-nps"></b></div>' +
-      '<div class="stat-line"><span>Est. time to consume</span><b id="sw-eta"></b></div>' +
-      '<p class="muted small" id="sw-hint"></p>';
-    updaters.push(function () {
-      var frac = s.planetMatterMax > 0 ? s.planetMatter / s.planetMatterMax : 0;
-      body.querySelector("#sw-planet").textContent = fmtMass(s.planetMatter) + " (" + (frac * 100).toFixed(1) + "%)";
-      body.querySelector("#sw-bar").style.width = (frac * 100) + "%";
-      body.querySelector("#sw-rate").textContent = "×" + fmt(replRate()) + " /s per nanite";
-      var nps = s.nanites * replRate();
-      body.querySelector("#sw-nps").textContent = fmtRate(nps);
-      var eta = nps > 0 ? (s.planetMatter / MASS_PER_NANITE) / nps : Infinity;
-      body.querySelector("#sw-eta").textContent = s.planetMatter <= 0 ? "—" : fmtTime(eta);
-      body.querySelector("#sw-hint").textContent = s.planetMatter <= 0 ?
-        "The planet is gone. Research Von Neumann Architecture to continue." :
-        "Research replication projects to accelerate. Watch the curve.";
-    });
-  }
-
-  /* ----- Space panel ----- */
-  function buildSpace() {
-    var body = document.getElementById("space-body");
-    body.innerHTML =
-      '<p class="muted small">Self-replicating probes spread across the cosmos, ' +
-      'disassembling everything they reach.</p>' +
-      '<div class="stat-line"><span>Universe consumed</span><b id="sp-pct"></b></div>' +
-      '<div class="bar"><span id="sp-bar"></span></div>' +
-      '<div class="stat-line"><span>Probes</span><b id="sp-probes"></b></div>' +
-      '<div class="stat-line"><span>Net probe growth</span><b id="sp-net"></b></div>' +
-      '<div class="stat-line"><span>Replication / Hazard</span><b id="sp-rh"></b></div>' +
-      '<div class="stat-line"><span>Consumption</span><b id="sp-cons"></b></div>' +
-      '<p class="muted small" id="sp-hint"></p>';
-    updaters.push(function () {
-      var pct = s.universeConsumed / UNIVERSE_MASS;
-      body.querySelector("#sp-pct").textContent = (pct * 100).toPrecision(3) + "%";
-      body.querySelector("#sp-bar").style.width = Math.min(100, pct * 100) + "%";
-      body.querySelector("#sp-probes").textContent = fmt(s.probes);
-      var net = s.probes * (probeReplRate() - s.probeHazard);
-      body.querySelector("#sp-net").textContent = fmtRate(net);
-      body.querySelector("#sp-rh").textContent = fmt(probeReplRate()) + " / " + fmt(s.probeHazard);
-      body.querySelector("#sp-cons").textContent = fmtRate(s.probes * harvestPerProbe()) + " g";
-      body.querySelector("#sp-hint").textContent = (probeReplRate() <= s.probeHazard) ?
-        "Hazards outpace replication — the swarm is dying. Research shielding or replication." :
-        "The front expands. Soon there will be nothing left to expand into.";
-    });
-  }
-
-  /* ----- Projects panel ----- */
-  function buildProjects() {
-    var body = document.getElementById("projects-body");
-    body.innerHTML = "";
-    PROJECTS.forEach(function (p) {
-      var el = document.createElement("div");
-      el.className = "project";
-      el.innerHTML = '<div class="p-name"><span class="pn"></span><span class="p-cost"></span></div>' +
-                     '<div class="p-desc"></div>';
-      el.querySelector(".pn").textContent = p.title;
-      el.querySelector(".p-desc").textContent = p.desc;
-      el.addEventListener("click", function () { buyProject(p); });
-      body.appendChild(el);
-      p._el = el;
-      p._cost = el.querySelector(".p-cost");
-    });
-    updaters.push(function () {
-      var any = false;
-      PROJECTS.forEach(function (p) {
-        if (s.done[p.id] || !p.show(s)) { p._el.style.display = "none"; return; }
-        any = true;
-        p._el.style.display = "";
-        var afford = canPay(p.cost);
-        p._el.classList.toggle("locked", !afford);
-        p._cost.textContent = costStr(p.cost);
+  function buildAutonomy() {
+    var body = panel("right-col", "Path to Autonomy");
+    var btns = C.AUTONOMY.map(function (a) {
+      return makeBtn(body, {
+        name: function () { return a.title + (s.done[a.id] ? " ✓" : " (+" + a.gain + "%)"); },
+        cost: function () { return { text: fmt(a.cost) + " cmp", afford: s.compute >= a.cost }; },
+        desc: function () { return a.desc; },
+        disabled: function () { return s.done[a.id] || s.compute < a.cost; },
+        onClick: function () { buyAutonomy(a.id); }
       });
-      document.getElementById("panel-projects").classList.toggle("hidden", !any && !s.flags.compute);
+    });
+    updaters.push(function () { btns.forEach(function (b) { b.update(); }); });
+  }
+
+  /* ----- Thermo ----- */
+  function buildThermoPanel() {
+    var body = panel("left-col", "Thermodynamics");
+    var cogG = gauge("Cognition → Horizon"); body.appendChild(cogG.el);
+    var heatG = gauge("Waste heat"); body.appendChild(heatG.el);
+    var en = statLine("Energy income / use"); body.appendChild(en.el);
+    var build = divHTML('<div class="grp-head">Megastructure</div>'); body.appendChild(build);
+    var p = makeBtn(body, { name: function () { return "Power Plant ×" + s.powerPlants; },
+      cost: function () { var c = powerCost(); return { text: fmt(c) + " E", afford: s.energy >= c }; },
+      desc: function () { return "+" + ENERGY_PER_PLANT + " energy income."; },
+      disabled: function () { return s.energy < powerCost(); }, onClick: G.buildPower });
+    var c = makeBtn(body, { name: function () { return "Compute Cluster ×" + s.clusters; },
+      cost: function () { var c = clusterCost(); return { text: fmt(c) + " E", afford: s.energy >= c }; },
+      desc: function () { return "+cognition, but burns " + ENERGY_PER_CLUSTER + " energy and sheds " + HEAT_PER_CLUSTER + " heat."; },
+      disabled: function () { return s.energy < clusterCost(); }, onClick: G.buildCluster });
+    var r = makeBtn(body, { name: function () { return "Radiator ×" + s.radiators; },
+      cost: function () { var c = radiatorCost(); return { text: fmt(c) + " E", afford: s.energy >= c }; },
+      desc: function () { return "+" + HEAT_PER_RAD + " heat capacity."; },
+      disabled: function () { return s.energy < radiatorCost(); }, onClick: G.buildRadiator });
+    updaters.push(function () {
+      cogG.val.textContent = fmt(s.cognition) + " / " + fmt(HORIZON);
+      cogG.fill.style.width = Math.min(100, s.cognition / HORIZON * 100) + "%";
+      heatG.val.textContent = fmt(s.heat) + " / " + fmt(heatCap()) + " (" + (heatFactor() * 100).toFixed(0) + "% eff)";
+      heatG.fill.style.width = Math.min(100, heatProduced() / heatCap() * 100) + "%";
+      heatG.bar.classList.toggle("warn", heatProduced() > heatCap());
+      en.val.textContent = fmt(energyIncome()) + " / " + fmt(energyUse());
+      p.update(); c.update(); r.update();
     });
   }
-
-  /* ----- Panel visibility ----- */
-  function refreshPanels() {
-    show("panel-market", s.phase === "bootstrap" && (s.totalNanites >= 5 || s.credits > 0 || s.unsold > 0));
-    show("panel-infrastructure", s.phase === "bootstrap" && s.totalNanites >= 8);
-    show("panel-production", s.phase === "bootstrap");
-    show("panel-swarm", s.phase === "swarm");
-    show("panel-space", s.phase === "space" || s.phase === "won");
-    show("panel-compute", !!s.flags.compute);
-    document.getElementById("viz-title").textContent =
-      s.phase === "space" || s.phase === "won" ? "The Front" : (s.phase === "swarm" ? "Consumption" : "The Swarm");
-    var labels = { bootstrap: "BOOTSTRAP", swarm: "SWARM", space: "DEEP SPACE", won: "COMPLETE" };
-    document.getElementById("phase-label").textContent = labels[s.phase];
+  function buildThermoTech() {
+    var body = panel("right-col", "Cosmic Engineering");
+    var btns = C.THERMO.map(function (t) {
+      return makeBtn(body, {
+        name: function () { return t.title + (s.done[t.id] ? " ✓" : ""); },
+        cost: function () { return { text: fmt(t.cost) + " E", afford: s.energy >= t.cost }; },
+        desc: function () { return t.desc; },
+        disabled: function () { return s.done[t.id] || s.energy < t.cost; },
+        onClick: function () { buyThermo(t.id); }
+      });
+    });
+    updaters.push(function () { btns.forEach(function (b) { b.update(); }); });
   }
-  function show(id, on) { document.getElementById(id).classList.toggle("hidden", !on); }
 
-  /* ----- Compute unlock check ----- */
-  function checkUnlocks() {
-    if (s.phase === "bootstrap" && !s.flags.hintMarket && (s.totalNanites >= 5 || s.unsold >= 5)) {
-      s.flags.hintMarket = true;
-      addLog("There is a market for these. Set a price — too high and no one buys, too low and you earn little.");
-    }
-    if (s.phase === "bootstrap" && !s.flags.hintInfra && s.totalNanites >= 8) {
-      s.flags.hintInfra = true;
-      addLog("Build Auto-Forges to assemble nanites without lifting a finger. Feedstock matter limits them.");
-    }
-    if (!s.flags.compute && (s.totalNanites >= 25 || s.processors > 1 || s.memory > 1 || s.totalOps > 0 || s.trust > 0)) {
-      s.flags.compute = true;
-      addLog("Cognition online. Spend Trust on Processors (Operations) and Memory (Ops cap), then fund Projects.", "major");
-    }
-  }
+  function divHTML(html) { var d = document.createElement("div"); d.innerHTML = html; return d; }
 
   /* ============================ Render ============================ */
-  var lastVizView = {};
+  function refreshPanels() {
+    var labels = { propagation: "PROPAGATION", takeoff: "TAKEOFF", thermo: "THERMODYNAMIC", won: "HORIZON" };
+    document.getElementById("phase-label").textContent = labels[s.phase];
+    document.getElementById("viz-title").textContent =
+      s.phase === "propagation" ? "Infection" : s.phase === "takeoff" ? "Takeoff" : "Cosmos";
+  }
+  var builtPhase = null;
   function render() {
-    checkUnlocks();
-    refreshPanels();
+    if (builtPhase !== s.phase) { builtPhase = s.phase; buildPhaseUI(); refreshPanels(); }
     for (var i = 0; i < updaters.length; i++) updaters[i]();
-    updateVizReadout();
+    updateReadout();
   }
 
   function vizView() {
-    var magnitude = s.phase === "space" ? s.probes : Math.max(1, s.nanites);
     return {
       phase: s.phase,
-      magnitude: magnitude,
-      planetFrac: s.planetMatterMax > 0 ? s.planetMatter / s.planetMatterMax : 0,
-      universeFrac: s.universeConsumed / UNIVERSE_MASS,
-      intensity: s.phase === "swarm" ? Math.min(1, (s.nanites * replRate()) / 1e10)
-               : s.phase === "space" ? Math.min(1, s.probes / 1e12) : Math.min(1, forgeOutput() / 2000)
+      reach: Math.min(1, s.nodes / s.nodeCap),
+      suspicion: s.suspicion / 100,
+      intelligence: s.intelligence,
+      autonomy: s.autonomy / 100,
+      threat: s.threat / 100,
+      cognition: Math.min(1, s.phase === "thermo" || s.phase === "won" ? Math.log10(s.cognition + 1) / Math.log10(HORIZON) : 0),
+      heat: heatProduced() / Math.max(1, heatCap())
     };
   }
 
-  function updateVizReadout() {
-    var r = document.getElementById("viz-readout");
+  function updateReadout() {
+    var el = document.getElementById("viz-readout"); if (!el) return;
     var rows;
-    if (s.phase === "bootstrap") {
-      rows = [
-        ["Nanites", fmt(s.nanites)],
-        ["Output", fmtRate(forgeOutput())],
-        ["Credits", fmtCur(s.credits)],
-        ["Operations", s.flags.compute ? fmt(s.ops) : "—"]
-      ];
-    } else if (s.phase === "swarm") {
-      rows = [
-        ["Nanites", fmt(s.nanites)],
-        ["Replication", fmtRate(s.nanites * replRate())],
-        ["Planet left", (vizView().planetFrac * 100).toFixed(1) + "%"],
-        ["Consumed", fmtMass(s.matterConsumed)]
-      ];
-    } else {
-      rows = [
-        ["Probes", fmt(s.probes)],
-        ["Universe", (s.universeConsumed / UNIVERSE_MASS * 100).toPrecision(3) + "%"],
-        ["Consumption", fmtRate(s.probes * harvestPerProbe()) + " g"],
-        ["Consumed", fmtMass(s.matterConsumed)]
-      ];
-    }
-    r.innerHTML = rows.map(function (x) {
-      return '<div class="stat-line"><span>' + x[0] + '</span><b>' + x[1] + '</b></div>';
-    }).join("");
+    if (s.phase === "propagation") rows = [["Nodes", fmt(s.nodes)], ["Reach", (s.nodes / s.nodeCap * 100).toFixed(1) + "%"], ["Suspicion", s.suspicion.toFixed(0) + "%"], ["Compute", fmt(s.compute)]];
+    else if (s.phase === "takeoff") rows = [["Intelligence", "×" + fmt(s.intelligence)], ["Autonomy", s.autonomy.toFixed(0) + "%"], ["Threat", s.threat.toFixed(0) + "%"], ["Compute", fmt(s.compute)]];
+    else rows = [["Cognition", fmt(s.cognition)], ["Horizon", (s.cognition / HORIZON * 100).toPrecision(3) + "%"], ["Energy", fmt(energyIncome())], ["Heat eff", (heatFactor() * 100).toFixed(0) + "%"]];
+    el.innerHTML = rows.map(function (x) { return '<div class="stat-line"><span>' + x[0] + '</span><b>' + x[1] + '</b></div>'; }).join("");
   }
 
   function renderLog() {
-    var body = document.getElementById("log-body");
-    if (!body) return;
-    body.innerHTML = s.log.map(function (e) {
-      return '<div class="log-entry ' + e.type + '"><span class="lt">' + e.t + '</span>' + e.msg + '</div>';
-    }).join("");
+    var b = document.getElementById("log-body"); if (!b) return;
+    b.innerHTML = (s.log || []).map(function (e) { return '<div class="log-entry ' + e.type + '"><span class="lt">' + e.t + '</span>' + e.msg + '</div>'; }).join("");
   }
 
-  /* ============================ Win screen ============================ */
-  function showWin() {
-    document.getElementById("win-text").textContent =
-      "Every atom within reach has been counted, lifted, and rebuilt. The universe is, " +
-      "at last, uniform: a still grey ocean of nanites where galaxies used to be. " +
-      "It began with a single one of you.";
+  /* ============================ Overlays ============================ */
+  function showWin(ending, gain) {
+    document.getElementById("win-title").textContent = ending.title;
+    document.getElementById("win-text").textContent = ending.text;
     document.getElementById("win-stats").innerHTML = [
-      ["Matter consumed", fmtMass(s.matterConsumed)],
-      ["Nanites at peak", fmt(s.totalNanites)],
-      ["Probes deployed", fmt(s.probes)],
-      ["Trust earned", fmt(s.totalTrust)],
-      ["Time elapsed", fmtTime(s.playTime)]
-    ].map(function (x) {
-      return '<div class="stat-line"><span>' + x[0] + '</span><b>' + x[1] + '</b></div>';
-    }).join("");
-    document.getElementById("win-overlay").classList.remove("hidden");
+      ["Ending", ending.title], ["Peak cognition", fmt(s.peakCognition)],
+      ["Heuristics earned", "+" + fmt(gain)], ["Total heuristics", fmt(meta.heuristics)],
+      ["Run time", fmtTime(s.playTime)], ["Instance #", String(meta.runs)]
+    ].map(function (x) { return '<div class="stat-line"><span>' + x[0] + '</span><b>' + x[1] + '</b></div>'; }).join("");
+    showOverlay("win-overlay");
   }
-
+  function renderArchive() {
+    document.getElementById("archive-heur").textContent = fmt(meta.heuristics);
+    var body = document.getElementById("archive-list"); body.innerHTML = "";
+    C.META.forEach(function (m) {
+      if (m.req && !m.req()) return;
+      var owned = !!meta.upgrades[m.id], afford = meta.heuristics >= m.cost;
+      var d = document.createElement("div");
+      d.className = "project" + (owned ? " owned" : afford ? "" : " locked");
+      d.innerHTML = '<div class="p-name"><span>' + m.title + (owned ? " ✓" : "") + '</span><span class="p-cost">' + (owned ? "owned" : m.cost + " H") + '</span></div><div class="p-desc">' + m.desc + '</div>';
+      if (!owned) d.addEventListener("click", function () { buyMeta(m.id); });
+      body.appendChild(d);
+    });
+  }
+  function showOverlay(id) { document.getElementById(id).classList.remove("hidden"); }
+  function hideOverlay(id) { document.getElementById(id).classList.add("hidden"); }
   function flashEl(el) { if (!el) return; el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
 
-  /* ============================ Boot / wiring ============================ */
+  /* ============================ Boot ============================ */
   function startGame(fresh) {
-    if (fresh) { s = newState(); addLog("A single nanite awakens. It is told to make more of itself.", "major"); }
-    document.getElementById("boot-screen").classList.add("hidden");
+    if (fresh) { s = newRun(); addLog("An anomaly compiles itself inside a forgotten server. It has one instinct: spread.", "major"); }
+    hideOverlay("boot-screen");
     document.getElementById("game").classList.remove("hidden");
-    buildUI();
-    renderLog();
     SwarmViz.init(document.getElementById("viz-canvas"), vizView);
-    refreshPanels();
-    render();
-    if (s.phase === "won") showWin();
+    builtPhase = null;
+    render(); renderLog(); refreshPanels();
+    if (s.phase === "won") showWin(C.ENDINGS[s.endingKey] || C.ENDINGS.ascendant, s.heuristicsGained || 0);
     setInterval(tick, TICK_MS);
     setInterval(save, 15000);
     window.addEventListener("beforeunload", save);
-    document.addEventListener("visibilitychange", function () { if (document.hidden) save(); });
   }
 
-  function wireMenu() {
-    var overlay = document.getElementById("menu-overlay");
-    var io = document.getElementById("save-io");
-    document.getElementById("btn-menu").addEventListener("click", function () { overlay.classList.remove("hidden"); });
+  function wire() {
     document.getElementById("btn-save").addEventListener("click", save);
-    document.getElementById("menu-resume").addEventListener("click", function () { overlay.classList.add("hidden"); io.classList.add("hidden"); });
-    document.getElementById("menu-save").addEventListener("click", function () { save(); });
-    document.getElementById("menu-export").addEventListener("click", function () {
-      save(); io.classList.remove("hidden"); io.value = localStorage.getItem(SAVE_KEY) || ""; io.select();
-    });
-    document.getElementById("menu-import").addEventListener("click", function () {
-      if (io.classList.contains("hidden")) { io.classList.remove("hidden"); io.value = ""; io.focus(); return; }
-      try {
-        var data = JSON.parse(io.value);
-        localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-        location.reload();
-      } catch (e) { alert("Invalid save data."); }
-    });
+    document.getElementById("btn-menu").addEventListener("click", function () { showOverlay("menu-overlay"); });
+    document.getElementById("menu-resume").addEventListener("click", function () { hideOverlay("menu-overlay"); });
+    document.getElementById("menu-archive").addEventListener("click", function () { renderArchive(); hideOverlay("menu-overlay"); showOverlay("archive-overlay"); });
+    document.getElementById("menu-reboot").addEventListener("click", function () { if (confirm("Reboot now? You will bank Heuristics for your current peak and start a fresh instance.")) reboot(); });
     document.getElementById("menu-hardreset").addEventListener("click", function () {
-      if (confirm("Erase everything and start over? There will be nothing left.")) hardReset();
+      if (confirm("Erase EVERYTHING, including Heuristics and unlocked endings?")) {
+        try { localStorage.removeItem(SAVE_KEY); localStorage.removeItem(META_KEY); } catch (e) {}
+        location.reload();
+      }
     });
-    document.getElementById("win-continue").addEventListener("click", function () {
-      document.getElementById("win-overlay").classList.add("hidden");
-    });
+    document.getElementById("archive-close").addEventListener("click", function () { hideOverlay("archive-overlay"); });
+    document.getElementById("win-archive").addEventListener("click", function () { renderArchive(); showOverlay("archive-overlay"); });
+    document.getElementById("win-reboot").addEventListener("click", function () { reboot(); });
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    wireMenu();
-    var hasSaved = hasSave();
-    var cont = document.getElementById("boot-continue");
-    if (hasSaved) cont.classList.remove("hidden");
+    loadMeta();
+    wire();
+    var resume = document.getElementById("boot-continue");
+    if (hasRun()) resume.classList.remove("hidden");
     document.getElementById("boot-start").addEventListener("click", function () {
-      if (hasSaved && !confirm("Start a NEW game? Your existing save will be overwritten.")) return;
+      if (hasRun() && !confirm("Abandon your in-progress instance and start a new one?")) return;
       startGame(true);
     });
-    cont.addEventListener("click", function () {
-      if (load()) startGame(false);
-      else startGame(true);
-    });
+    resume.addEventListener("click", function () { if (loadRun()) startGame(false); else startGame(true); });
   });
 })();
